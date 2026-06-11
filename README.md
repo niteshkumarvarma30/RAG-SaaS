@@ -8,6 +8,35 @@ This is a Retrieval-Augmented Generation (RAG) platform with strict Multi-Tenanc
 - **Agentic Routing:** Uses LangGraph and Groq (`llama-3.1-8b-instant`) to classify user intents (Greeting vs Technical), grade documents, and rewrite bad queries.
 - **Generative Chat:** Uses Sarvam-30B to synthesize answers seamlessly.
 
+## Workflow Diagram
+
+```mermaid
+graph TD
+    User([User Query]) --> Router{Router<br/>(Groq/Llama-3)}
+    
+    %% Routing Logic
+    Router -->|Greeting / FAQ| Cache[Static Response Cache]
+    Cache --> Output([Final Answer])
+    
+    Router -->|Technical Query| Hybrid[Hybrid Search Engine]
+    
+    %% Retrieval
+    subgraph Retrieval Phase
+        Hybrid --> VS[(Supabase pgvector<br/>Cosine Similarity)]
+        Hybrid --> KS[(Supabase FTS<br/>BM25 Keyword)]
+        Hybrid --> GS[(Neo4j Graph<br/>Cypher Queries)]
+        VS & KS & GS --> RRF[Reciprocal Rank Fusion<br/>Top 15 Chunks]
+    end
+    
+    %% Evaluation
+    RRF --> Grader{Document Grader<br/>(Groq/Llama-3)}
+    
+    Grader -->|Relevant Context| Generator[Response Generator<br/>(Sarvam-30B)]
+    Grader -->|Irrelevant Context| Rewriter[Query Rewriter<br/>(Groq/Llama-3)]
+    
+    Rewriter --> Hybrid
+    Generator --> Output
+```
 ## Getting Started
 
 1. Clone the repository.
