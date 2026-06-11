@@ -12,27 +12,27 @@ This is a Retrieval-Augmented Generation (RAG) platform with strict Multi-Tenanc
 
 ```mermaid
 graph TD
-    User([User Query]) --> Router{Router<br/>(Groq/Llama-3)}
+    User(["User Query"]) --> Router{"Router<br/>(Groq/Llama-3)"}
     
     %% Routing Logic
-    Router -->|Greeting / FAQ| Cache[Static Response Cache]
-    Cache --> Output([Final Answer])
+    Router -->|Greeting / FAQ| Cache["Static Response Cache"]
+    Cache --> Output(["Final Answer"])
     
-    Router -->|Technical Query| Hybrid[Hybrid Search Engine]
+    Router -->|Technical Query| Hybrid["Hybrid Search Engine"]
     
     %% Retrieval
     subgraph Retrieval Phase
-        Hybrid --> VS[(Supabase pgvector<br/>Cosine Similarity)]
-        Hybrid --> KS[(Supabase FTS<br/>BM25 Keyword)]
-        Hybrid --> GS[(Neo4j Graph<br/>Cypher Queries)]
-        VS & KS & GS --> RRF[Reciprocal Rank Fusion<br/>Top 15 Chunks]
+        Hybrid --> VS[("Supabase pgvector<br/>Cosine Similarity")]
+        Hybrid --> KS[("Supabase FTS<br/>BM25 Keyword")]
+        Hybrid --> GS[("Neo4j Graph<br/>Cypher Queries")]
+        VS & KS & GS --> RRF["Reciprocal Rank Fusion<br/>Top 15 Chunks"]
     end
     
     %% Evaluation
-    RRF --> Grader{Document Grader<br/>(Groq/Llama-3)}
+    RRF --> Grader{"Document Grader<br/>(Groq/Llama-3)"}
     
-    Grader -->|Relevant Context| Generator[Response Generator<br/>(Sarvam-30B)]
-    Grader -->|Irrelevant Context| Rewriter[Query Rewriter<br/>(Groq/Llama-3)]
+    Grader -->|Relevant Context| Generator["Response Generator<br/>(Sarvam-30B)"]
+    Grader -->|Irrelevant Context| Rewriter["Query Rewriter<br/>(Groq/Llama-3)"]
     
     Rewriter --> Hybrid
     Generator --> Output
