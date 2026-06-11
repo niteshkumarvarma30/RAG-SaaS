@@ -1,0 +1,6 @@
+.venv/
+__pycache__/
+.env
+*.pdf
+search_results.txt
+*.log

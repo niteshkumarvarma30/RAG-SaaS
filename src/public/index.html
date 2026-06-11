@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mock Customer Website</title>
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f4f4f9; padding: 50px; margin: 0;}
+        h1 { color: #333; }
+        .content { max-width: 800px; margin: 0 auto; background: white; padding: 40px; border-radius: 12px; box-shadow: 0 10px 25px rgba(0,0,0,0.05); }
+        .code-block { background: #1e1e1e; color: #d4d4d4; padding: 15px; border-radius: 8px; font-family: monospace; overflow-x: auto;}
+    </style>
+</head>
+<body>
+    <div class="content">
+        <h1>Welcome to Postgres Co!</h1>
+        <p>This is a fake customer website. We are <strong>Tenant A</strong>.</p>
+        <p>Notice the modern floating chat widget in the bottom right corner? That's your Hybrid RAG SaaS being injected perfectly into this page using a Shadow DOM.</p>
+        
+        <h3>Test the Widget</h3>
+        <p>Click the purple button and try asking it a highly specific question, such as:</p>
+        <div class="code-block">How do I setup Postgres replication?</div>
+        
+        <p style="margin-top: 30px; font-size: 14px; color: #666;">
+            When you ask a question, the widget hits the FastAPI endpoint securely, processes through LangGraph, and then automatically logs the tokens into Supabase for billing!
+        </p>
+    </div>
+
+    <!-- INJECTING THE WIDGET -->
+    <!-- Notice we pass the tenant_id securely into the script tag -->
+    <script 
+        src="widget.js" 
+        data-tenant-id="619f50ab-df74-4057-9305-05a70fdc2474"
+        data-api-url="http://localhost:8000/api/v1/chat">
+    </script>
+</body>
+</html>

@@ -1,0 +1,13 @@
+fastapi
+uvicorn
+supabase
+neo4j
+pydantic
+pydantic-settings
+python-dotenv
+pyjwt
+pymupdf
+langchain-text-splitters
+openai
+instructor
+python-multipart
