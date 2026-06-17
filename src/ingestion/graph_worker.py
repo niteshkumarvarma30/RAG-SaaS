@@ -80,7 +80,7 @@ def resolve_coreferences(chunk: str) -> str:
 
 import concurrent.futures
 
-def process_single_chunk(chunk: str, tenant_id: str):
+def process_single_chunk(chunk: str, tenant_id: str, document_id: str):
     """Processes a single chunk in its own thread with its own Neo4j session."""
     try:
         print("    -> Resolving Coreferences...")
@@ -98,7 +98,10 @@ def process_single_chunk(chunk: str, tenant_id: str):
                     WITH e
                     MATCH (t:Tenant {id: $tenant_id})
                     MERGE (e)-[:BELONGS_TO]->(t)
-                """, name=ent.name, type=ent.type, tenant_id=tenant_id)
+                    WITH e
+                    MATCH (d:Document {id: $doc_id})
+                    MERGE (e)-[:FOUND_IN]->(d)
+                """, name=ent.name, type=ent.type, tenant_id=tenant_id, doc_id=document_id)
             
             # Merge Relationships
             for rel in graph_data.relationships:
@@ -132,5 +135,5 @@ def process_graph_track_sync(tenant_id: str, document_id: str, chunks: list[tupl
     
     # Process all chunks in parallel (max 10 threads)
     with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
-        futures = [executor.submit(process_single_chunk, chunk, tenant_id) for chunk in unique_parents]
+        futures = [executor.submit(process_single_chunk, chunk, tenant_id, document_id) for chunk in unique_parents]
         concurrent.futures.wait(futures)

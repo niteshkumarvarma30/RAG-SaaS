@@ -10,15 +10,17 @@ class SupabaseManager:
         self.url = os.environ.get("SUPABASE_URL", "")
         # We use the anon key. The custom JWT handles the permissions.
         self.key = os.environ.get("SUPABASE_KEY", "")
+        self.service_role_key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
         self.jwt_secret = os.environ.get("SUPABASE_JWT_SECRET", "")
         
-        if not self.url or not self.key:
-            raise ValueError("SUPABASE_URL and SUPABASE_KEY must be provided.")
+        if not self.url or not self.key or not self.service_role_key:
+            raise ValueError("SUPABASE_URL, SUPABASE_KEY, and SUPABASE_SERVICE_ROLE_KEY must be provided.")
         
-        self._admin_client: Client = create_client(self.url, self.key)
+        # Admin client uses the service_role key to bypass all RLS policies
+        self._admin_client: Client = create_client(self.url, self.service_role_key)
 
     def get_admin_client(self) -> Client:
-        """Returns the base client. Be careful, if this uses the anon key without a JWT, RLS blocks access."""
+        """Returns the admin client initialized with the service_role key. Bypasses RLS."""
         return self._admin_client
     
     def get_tenant_client(self, tenant_id: str) -> Client:

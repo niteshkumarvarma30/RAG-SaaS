@@ -88,7 +88,7 @@ def grade_documents(state):
             "top_n": len(chunks)
         }
         
-        response = requests.post("https://api.jina.ai/v1/rerank", headers=headers, json=payload)
+        response = requests.post("https://api.jina.ai/v1/rerank", headers=headers, json=payload, timeout=10)
         response.raise_for_status()
         data = response.json()
         
@@ -114,11 +114,12 @@ def grade_documents(state):
 
 @traceable(name="generate_answer")
 def generate(state):
-    print("--- GENERATING FINAL ANSWER VIA SARVAM-30B ---")
+    print("--- GENERATING FINAL ANSWER VIA SARVAM-105B ---")
     question = state["question"]
     documents = state["documents"]
     preferences = state.get("preferences", {})
     summary = state.get("summary", "")
+    chat_history = state.get("chat_history", [])
     
     system_prompt = "You are an expert SaaS support assistant. Answer the user's question using ONLY the provided context. You must ONLY answer in English, regardless of the language the user speaks. If the context doesn't have the answer, say you don't know."
     
@@ -128,6 +129,16 @@ def generate(state):
     context_block = f"Context:\n{documents}"
     if summary:
         context_block += f"\n\nPrevious Conversation Summary:\n{summary}"
+        
+    # Inject Short-Term Memory Buffer
+    if chat_history:
+        # Keep up to the last 6 messages
+        recent_history = chat_history[-6:]
+        history_str = ""
+        for msg in recent_history:
+            role = "User" if msg["role"] == "user" else "Assistant"
+            history_str += f"{role}: {msg['content']}\n"
+        context_block += f"\n\nRecent Chat History:\n{history_str}"
     
     response = gen_client.chat.completions.create(
         model="sarvam-105b",
@@ -176,15 +187,20 @@ def save_memory(state):
     chat_history = state.get("chat_history", [])
     current_summary = state.get("summary", "")
     
-    # We only distill if there are multiple turns
-    if len(chat_history) < 2:
-        return {}
-        
     try:
         history_str = ""
         for msg in chat_history:
             role = "User" if msg["role"] == "user" else "Assistant"
             history_str += f"{role}: {msg['content']}\n"
+            
+        # Append the current interaction!
+        current_q = state.get("question", "")
+        current_a = state.get("generation", "")
+        if current_q and current_a:
+            history_str += f"User: {current_q}\nAssistant: {current_a}\n"
+            
+        if not history_str.strip():
+            return {}
             
         system_prompt = "You are a memory distillation AI. Given an existing summary and a new chat transcript, generate an updated, concise summary of the entire interaction. Focus on key facts, decisions, and context. Do NOT answer the user."
         prompt = f"Existing Summary: {current_summary}\n\nNew Transcript:\n{history_str}"

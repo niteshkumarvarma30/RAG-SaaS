@@ -66,6 +66,14 @@ To prevent the LLM's context window from blowing up with massive raw chat logs, 
 * **Distillation (End of Turn):** After every interaction, a background LLM reads the raw chat logs and condenses them into a 1-sentence summary (e.g., *"User asked about Platform Compatibility"*). This is saved in Supabase.
 * **Injection (Start of New Session):** If a user closes their browser or resets the server, their local `chat_history` is wiped. However, upon their very first new message, the `load_memory` node queries Supabase, pulls the tiny distilled summary, and silently injects it into the System Prompt. This allows the AI to "remember" previous conversations perfectly using less than 50 tokens!
 
+## Frontend UI & Authentication
+The platform features a modern React (Vite) frontend, split into two primary interfaces:
+- **Company Portal:** Allows authenticated admins to upload new documents (PDFs), monitor ingestion status, view token billing metrics, and execute safe Neo4j Graph Garbage Collection to completely wipe documents from all databases.
+- **Employee Portal:** A sleek chat interface where employees can interact with the RAG system. It features Server-Sent Events (SSE) to stream the LangGraph cognitive steps in real-time, providing transparency into the AI's thought process (e.g., "Routing Query", "Retrieving from Vector & Graph").
+
+**Multi-Tenancy with Clerk:**
+Authentication is handled via Clerk. When an admin registers a company, their unique Clerk `user_id` is deterministically hashed into a Postgres `UUID` (via `uuid5`). This UUID acts as the strict `tenant_id` that is mathematically enforced across the Supabase Row Level Security (RLS) policies, the pgvector vector store, and the Neo4j Knowledge Graph. This ensures Company A can never access Company B's data, even though they share the same physical database instances.
+
 ## Getting Started
 
 1. Clone the repository.
