@@ -79,46 +79,77 @@ async def chat_stream_endpoint(request: ChatRequest):
         "chat_history": request.chat_history
     }
     
-    def event_generator():
-        yield f"data: {json.dumps({'status': 'Connecting to CognitRAG.ai...'})}\n\n"
+    async def event_generator():
+        full_state = {}
+        answer = ""
+        import asyncio
         
-        full_state = initial_state.copy()
+        async for mode, data in crag_app.astream(initial_state, stream_mode=["updates", "messages"]):
+            if mode == "messages":
+                msg, meta = data
+                if msg.content and meta.get("langgraph_node") == "generate":
+                    token = msg.content
+                    answer += token
+                    await asyncio.sleep(0.01)  # Add typing effect delay
+                    yield f"data: {json.dumps({'token': token})}\n\n"
+                    
+            elif mode == "updates":
+                node_name = list(data.keys())[0]
+                update = data[node_name]
+                if update:
+                    full_state.update(update)
+                    
+                if node_name == "load_memory":
+                    yield f"data: {json.dumps({'status': 'Loading user memory...'})}\n\n"
+                elif node_name == "contextualize_query":
+                    yield f"data: {json.dumps({'status': 'Contextualizing query...'})}\n\n"
+                elif node_name == "check_cache":
+                    yield f"data: {json.dumps({'status': 'Checking semantic cache...'})}\n\n"
+                elif node_name == "route_query":
+                    yield f"data: {json.dumps({'status': 'Routing query...'})}\n\n"
+                elif node_name == "retrieve":
+                    yield f"data: {json.dumps({'status': 'Retrieving from Vector & Graph...'})}\n\n"
+                elif node_name == "grade_documents":
+                    yield f"data: {json.dumps({'status': 'Reranking and validating chunks...'})}\n\n"
+                elif node_name == "generate" or node_name == "generate_cached":
+                    yield f"data: {json.dumps({'status': 'Synthesizing final answer...'})}\n\n"
+                elif node_name == "rewrite":
+                    yield f"data: {json.dumps({'status': 'Rewriting query for better results...'})}\n\n"
+                    
+        # Graph execution finished. Get final answer.
+        final_answer = full_state.get("generation", answer)
         
-        for event in crag_app.stream(initial_state):
-            node_name = list(event.keys())[0]
-            
-            # Accumulate the state updates
-            update = event[node_name]
-            if update:
-                full_state.update(update)
+        # Execute memory and caching functions asynchronously in a background thread
+        from src.retrieval.nodes import get_embedding, save_memory
+        def background_tasks(state, u_tenant, req_msg, ans):
+            try:
+                save_memory(state)
+            except Exception as e:
+                print(f"Failed to manually save episodic memory: {e}")
                 
-            if node_name == "load_memory":
-                yield f"data: {json.dumps({'status': 'Loading user memory...'})}\n\n"
-            elif node_name == "contextualize_query":
-                yield f"data: {json.dumps({'status': 'Contextualizing query...'})}\n\n"
-            elif node_name == "check_cache":
-                yield f"data: {json.dumps({'status': 'Checking semantic cache...'})}\n\n"
-            elif node_name == "route_query":
-                yield f"data: {json.dumps({'status': 'Routing query...'})}\n\n"
-            elif node_name == "retrieve":
-                yield f"data: {json.dumps({'status': 'Retrieving from Vector & Graph...'})}\n\n"
-            elif node_name == "grade_documents":
-                yield f"data: {json.dumps({'status': 'Reranking and validating chunks...'})}\n\n"
-            elif node_name == "generate" or node_name == "generate_cached":
-                yield f"data: {json.dumps({'status': 'Synthesizing final answer...'})}\n\n"
-            elif node_name == "rewrite":
-                yield f"data: {json.dumps({'status': 'Rewriting query for better results...'})}\n\n"
-            elif node_name == "save_memory":
-                yield f"data: {json.dumps({'status': 'Distilling conversation memory...'})}\n\n"
+            try:
+                query_embedding = get_embedding(req_msg)
+                db = supabase_manager.get_tenant_client(u_tenant)
+                db.table("semantic_cache").insert({
+                    "tenant_id": u_tenant,
+                    "query": req_msg,
+                    "query_embedding": query_embedding,
+                    "response": ans
+                }).execute()
+            except Exception as e:
+                print(f"Failed to save semantic cache: {e}")
+        
+        if final_answer:
+            import threading
+            threading.Thread(target=background_tasks, args=(full_state, uuid_tenant, request.message, final_answer)).start()
             
-        answer = full_state.get("generation", "")
         context_docs = full_state.get("documents", [])
         if isinstance(context_docs, str):
             context_string = context_docs
         else:
             context_string = "\n\n".join([doc.page_content for doc in context_docs if hasattr(doc, "page_content")])
             
-        yield f"data: {json.dumps({'status': 'done', 'answer': answer, 'context': context_string})}\n\n"
+        yield f"data: {json.dumps({'status': 'done', 'answer': final_answer, 'context': context_string})}\n\n"
         
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 

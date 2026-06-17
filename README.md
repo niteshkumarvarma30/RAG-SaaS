@@ -6,7 +6,7 @@ This is a Retrieval-Augmented Generation (RAG) platform with strict Multi-Tenanc
 - **Multi-Tenant Isolation:** Supabase Row Level Security (RLS) ensures chunks are completely isolated.
 - **Hybrid Search (RRF):** Fuses Vector Search (Jina Embeddings in pgvector), Keyword Search (Postgres FTS), and Graph Search (Neo4j Cypher).
 - **Agentic Routing:** Uses LangGraph and Groq (`llama-3.1-8b-instant`) to classify user intents (Greeting vs Technical), grade documents, and rewrite bad queries.
-- **Generative Chat:** Uses Sarvam-30B to synthesize answers seamlessly.
+- **Generative Chat:** Uses `gpt-4o-mini` (via GitHub Models) to synthesize answers seamlessly with LangGraph native asynchronous token streaming.
 
 ## Workflow Diagram
 
@@ -38,7 +38,7 @@ graph TD
     %% Evaluation & Corrective RAG
     RRF --> Grader{"Jina Cross-Encoder<br/>Reranker Threshold"}
     
-    Grader -->|Score >= 0.05| Generator["Response Generator<br/>(Sarvam-30B)"]
+    Grader -->|Score >= 0.05| Generator["Response Generator<br/>(gpt-4o-mini)"]
     Grader -->|Score < 0.05| Rewriter{"CRAG Rewrite Node<br/>(Rewrite Count < 1?)"}
     
     Rewriter -->|Yes| RewriteLLM["Query Rewriter<br/>(Sarvam-105B)"]
@@ -63,7 +63,7 @@ graph TD
 5. **Reciprocal Rank Fusion (RRF):** The results from all three databases are mathematically fused together to surface the absolute best chunks, giving a 1.5x score boost to chunks where the search keywords match the Markdown Header.
 6. **Cross-Encoder Reranking:** The top 10 chunks are passed to the strict `jina-reranker-v2`. Any chunk that scores below `0.05` is instantly deleted to prevent hallucinations.
 7. **Corrective RAG (CRAG) Loop:** If the Reranker deletes *all* the chunks, the system intercepts the failure. Instead of answering "I don't know," an LLM dynamically rewrites the user's query and loops back to Step 4. (This is capped at 1 rewrite attempt to prevent infinite loops).
-8. **Generation & Memory Distillation:** The validated chunks are passed to `sarvam-30b` to generate the final answer. In the background, an LLM distills the interaction into a short summary and saves it back to the `episodic_memory` table for the next visit. New answers are also instantly saved to the `semantic_cache` table for 0ms lookup on future identical queries.
+8. **Generation & Memory Distillation:** The validated chunks are passed to `gpt-4o-mini` to generate the final answer via real-time SSE token streaming. In the background, an LLM distills the interaction into a short summary and saves it back to the `episodic_memory` table for the next visit. New answers are also instantly saved to the `semantic_cache` table for 0ms lookup on future identical queries.
 
 ### Stateful AI Memory (Handling Session Restarts)
 To prevent the LLM's context window from blowing up with massive raw chat logs, the system uses a **Distill & Inject** architecture across session boundaries:
@@ -76,7 +76,7 @@ The platform features a modern React (Vite) frontend, split into two primary int
 - **Employee Portal:** A sleek chat interface where employees can interact with the RAG system. It features Server-Sent Events (SSE) to stream the LangGraph cognitive steps in real-time, providing transparency into the AI's thought process (e.g., "Routing Query", "Retrieving from Vector & Graph").
 
 **Multi-Tenancy with Clerk:**
-Authentication is handled via Clerk. When an admin registers a company, their unique Clerk `user_id` is deterministically hashed into a Postgres `UUID` (via `uuid5`). This UUID acts as the strict `tenant_id` that is mathematically enforced across the Supabase Row Level Security (RLS) policies, the pgvector vector store, and the Neo4j Knowledge Graph. This ensures Company A can never access Company B's data, even though they share the same physical database instances.
+Authentication is handled via Clerk. When an admin registers a company, their unique Clerk `user_id` (e.g., `user_3FGB...`) acts as the strict `tenant_id` that is mathematically enforced across the Supabase Row Level Security (RLS) policies, the pgvector vector store, and the Neo4j Knowledge Graph. The database schema has been refactored to use native `TEXT` types rather than UUIDs to perfectly synchronize with Clerk's format, ensuring Company A can never access Company B's data.
 
 ## Getting Started
 

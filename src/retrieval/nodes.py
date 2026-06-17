@@ -6,6 +6,9 @@ from pydantic import BaseModel, Field
 from src.retrieval.hybrid import hybrid_retriever
 from src.database.supabase_client import supabase_manager
 from langsmith import traceable
+import google.generativeai as genai
+
+genai.configure(api_key=os.environ.get("GEMINI_API_KEY", ""))
 
 client = instructor.from_openai(OpenAI(
     api_key=os.environ.get("GROQ_API_KEY", ""),
@@ -15,6 +18,11 @@ client = instructor.from_openai(OpenAI(
 gen_client = OpenAI(
     api_key=os.environ.get("SARVAM_API_KEY", ""),
     base_url="https://api.sarvam.ai/v1"
+)
+
+github_client = OpenAI(
+    api_key=os.environ.get("GITHUB_TOKEN", ""),
+    base_url="https://models.inference.ai.azure.com"
 )
 
 # Create a separate instructor client specifically for Sarvam to handle structured Pydantic outputs
@@ -107,6 +115,7 @@ def grade_documents(state):
         chunks = documents.split("\n\n---\n\n")
         
         # Call Jina Reranker API
+        import requests, os
         headers = {
             "Authorization": f"Bearer {os.environ.get('JINA_API_KEY')}",
             "Content-Type": "application/json"
@@ -143,15 +152,15 @@ def grade_documents(state):
         return {"route": "yes"}
 
 @traceable(name="generate_answer")
-def generate(state):
-    print("--- GENERATING FINAL ANSWER VIA SARVAM-105B ---")
+def generate(state, config):
+    print("--- GENERATING FINAL ANSWER VIA GITHUB MODELS (GPT-4o-MINI) ---")
     question = state["question"]
     documents = state["documents"]
     preferences = state.get("preferences", {})
     summary = state.get("summary", "")
     chat_history = state.get("chat_history", [])
     
-    system_prompt = "You are an expert SaaS support assistant. Answer the user's question using ONLY the provided context. You must ONLY answer in English, regardless of the language the user speaks. If the context doesn't have the answer, say you don't know."
+    system_prompt = "You are an expert SaaS support assistant. Answer the user's question using the provided Context, Previous Conversation Summary, and Recent Chat History. You must ONLY answer in English. If the provided information doesn't contain the answer, say you don't know."
     
     if preferences:
         system_prompt += f"\n\nCRITICAL USER PREFERENCES YOU MUST FOLLOW:\n{preferences}"
@@ -170,14 +179,24 @@ def generate(state):
             history_str += f"{role}: {msg['content']}\n"
         context_block += f"\n\nRecent Chat History:\n{history_str}"
     
-    response = gen_client.chat.completions.create(
-        model="sarvam-105b",
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": f"{context_block}\n\nQuestion: {question}"}
-        ]
+    from langchain_openai import ChatOpenAI
+    from langchain_core.messages import SystemMessage, HumanMessage
+    import os
+    
+    llm = ChatOpenAI(
+        model="gpt-4o-mini",
+        temperature=0,
+        base_url="https://models.inference.ai.azure.com",
+        api_key=os.environ.get("GITHUB_TOKEN"),
+        streaming=True
     )
-    return {"generation": response.choices[0].message.content}
+    
+    response = llm.invoke([
+        SystemMessage(content=system_prompt),
+        HumanMessage(content=f"{context_block}\n\nQuestion: {question}")
+    ], config=config)
+    
+    return {"generation": response.content, "system_prompt": system_prompt, "context_block": context_block}
 
 @traceable(name="load_memory")
 def load_memory(state):
