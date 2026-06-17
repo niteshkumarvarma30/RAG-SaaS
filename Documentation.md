@@ -81,6 +81,11 @@ As we built this SaaS, we hit several technical bottlenecks that required archit
 > 
 > **Reason:** The Markdown Splitter caused "Context Starvation" bugs when headers contained formatting characters (like `**`). It also made chunk sizes unpredictable. We replaced it with a Recursive strategy that uses two splitters: a 2,000-character parent chunk for the LLM to read, and a 400-character child chunk for the Vector Database to search. This guarantees perfect context boundaries and hyper-accurate retrieval.
 
+> [!IMPORTANT]
+> **Added:** Corrective RAG (CRAG) & Infinite Loop Prevention
+> 
+> **Reason:** When the Jina Cross-Encoder correctly rejects all chunks because the user asked an irrelevant or trick question, the LLM was left with no context. Instead of just answering "I don't know", we implemented a CRAG loop. When all chunks are rejected, the LangGraph routes to a `rewrite` node that calls an LLM to dynamically reformulate the user's question, and triggers a second Hybrid Search. To guarantee safety and prevent infinite loops, we added a strictly typed `rewrite_count` integer to the LangGraph state that caps the system at 1 rewrite attempt.
+
 ## 3. Automated Evaluation Pipeline
 To guarantee the quality of the RAG system over time, we built a local automated evaluation pipeline (run_mlflow_eval.py). It uses an LLM-as-a-Judge (gpt-4o via GitHub Models API) to automatically grade the RAG API against a synthetic dataset of questions and expected answers. The results are logged directly to the local MLflow dashboard.
 

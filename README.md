@@ -25,16 +25,19 @@ graph TD
         Hybrid --> VS[("Supabase pgvector<br/>Cosine Similarity")]
         Hybrid --> KS[("Supabase FTS<br/>BM25 Keyword")]
         Hybrid --> GS[("Neo4j Graph<br/>Cypher Queries")]
-        VS & KS & GS --> RRF["Reciprocal Rank Fusion<br/>Top 15 Chunks"]
+        VS & KS & GS --> RRF["Reciprocal Rank Fusion<br/>Top 10 Chunks"]
     end
     
-    %% Evaluation
-    RRF --> Grader{"Document Grader<br/>(Groq/Llama-3)"}
+    %% Evaluation & Corrective RAG
+    RRF --> Grader{"Jina Cross-Encoder<br/>Reranker Threshold"}
     
-    Grader -->|Relevant Context| Generator["Response Generator<br/>(Sarvam-30B)"]
-    Grader -->|Irrelevant Context| Rewriter["Query Rewriter<br/>(Groq/Llama-3)"]
+    Grader -->|Score >= 0.05| Generator["Response Generator<br/>(Sarvam-30B)"]
+    Grader -->|Score < 0.05| Rewriter{"CRAG Rewrite Node<br/>(Rewrite Count < 1?)"}
     
-    Rewriter --> Hybrid
+    Rewriter -->|Yes| RewriteLLM["Query Rewriter<br/>(Sarvam-105B)"]
+    RewriteLLM --> Hybrid
+    
+    Rewriter -->|No| Generator
     Generator --> Output
 ```
 ## Getting Started
