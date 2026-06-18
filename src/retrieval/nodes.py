@@ -35,18 +35,23 @@ sarvam_instructor = instructor.from_openai(gen_client)
 instructor_client = instructor.from_openai(github_client)
 
 class RouteDecision(BaseModel):
-    intent: str = Field(description="Must be exactly 'greeting', 'faq', or 'technical_query'")
+    intent: str = Field(description="Must be exactly 'greeting', 'faq', 'conversational', or 'technical_query'")
 
 class GraderDecision(BaseModel):
     is_relevant: str = Field(description="Must be exactly 'yes' or 'no'")
 
 from src.retrieval.hybrid import get_embedding
+from src.retrieval.cache import LRUCache
+
+response_cache = LRUCache(max_size=500)
+memory_cache = LRUCache(max_size=200)
 
 class RewrittenQuery(BaseModel):
     new_query: str = Field(description="The reformulated question")
 
-class FactList(BaseModel):
+class MemoryExtraction(BaseModel):
     facts: list[str] = Field(description="A list of standalone factual statements extracted from the latest interaction")
+    preferences: dict[str, str] = Field(description="A dictionary mapping preference keys (e.g. 'formatting', 'language') to values (e.g. 'bullet points', 'Spanish') based on explicit user instructions.")
 
 
 @traceable(name="embed_query")
@@ -68,6 +73,14 @@ def check_cache(state):
     user_id = state.get("user_id", "default_user")
     
     try:
+        # 1. Check RAM Exact-Match Response Cache first (0ms)
+        r_key = response_cache.generate_key(tenant_id, question)
+        cached_ans = response_cache.get(r_key)
+        if cached_ans:
+            print("[Cache Hit] Exact match found in RAM response_cache")
+            return {"route": "cached", "generation": cached_ans}
+
+        # 2. Check Supabase Vector Semantic Cache (>95% similarity)
         query_embedding = state.get("query_embedding")
         if not query_embedding:
             return {"route": "not_cached"}
@@ -102,7 +115,7 @@ def route_query(state):
             model="gpt-4o-mini",
             response_model=RouteDecision,
             messages=[
-                {"role": "system", "content": "Classify the intent of the user query. ONLY return 'greeting' or 'faq' for pure small talk (like 'hello', 'who are you'). ALL other queries asking about systems, compatibility, developers, features, documents, or ANY follow-up questions (like 'what did we talk about', 'tell me more') MUST be classified as 'technical_query'."},
+                {"role": "system", "content": "Classify the intent of the user query. ONLY return 'greeting' or 'faq' for pure small talk (like 'hello', 'who are you'). Return 'conversational' if the user asks about the conversation history itself (like 'what did we talk about', 'summarize our chat'). ALL other queries asking about technical systems, features, or documents MUST be classified as 'technical_query'."},
                 {"role": "user", "content": question}
             ]
         )
@@ -238,25 +251,38 @@ def load_memory(state):
     user_id = state.get("user_id", "default_user")
     question = state.get("question", "")
     
-    db = supabase_manager.get_tenant_client(tenant_id)
-    
-    # 1. Load Preferences
-    preferences = {}
-    try:
-        pref_res = db.table("preference_memory").select("pref_key, pref_value").eq("tenant_id", tenant_id).eq("user_id", user_id).execute()
-        for row in pref_res.data:
-            preferences[row["pref_key"]] = row["pref_value"]
-    except Exception as e:
-        print(f"Failed to load preferences: {e}")
+    # 1. Check RAM Memory Cache for active users (0ms)
+    mem_key = memory_cache.generate_key(tenant_id, user_id)
+    cached_mem = memory_cache.get(mem_key)
+    if cached_mem:
+        print("[Cache Hit] Loaded LTM preferences and rolling context from RAM")
+        # We must re-fetch facts since the question changed, but we keep the cached preferences/rolling
+        preferences = cached_mem["preferences"]
+        rolling = cached_mem["rolling_context"]
+        db = supabase_manager.get_tenant_client(tenant_id)
+    else:
+        db = supabase_manager.get_tenant_client(tenant_id)
         
-    # 2. Load latest rolling context
-    rolling = ""
-    try:
-        sum_res = db.table("episodic_memory").select("summary").eq("tenant_id", tenant_id).eq("user_id", user_id).order("completed_at", desc=True).limit(1).execute()
-        if sum_res.data:
-            rolling = sum_res.data[0]["summary"]
-    except Exception as e:
-        print(f"Failed to load rolling context: {e}")
+        # 1. Load Preferences
+        preferences = {}
+        try:
+            pref_res = db.table("preference_memory").select("pref_key, pref_value").eq("tenant_id", tenant_id).eq("user_id", user_id).execute()
+            for row in pref_res.data:
+                preferences[row["pref_key"]] = row["pref_value"]
+        except Exception as e:
+            print(f"Failed to load preferences: {e}")
+            
+        # 2. Load latest rolling context
+        rolling = ""
+        try:
+            sum_res = db.table("episodic_memory").select("summary").eq("tenant_id", tenant_id).eq("user_id", user_id).order("completed_at", desc=True).limit(1).execute()
+            if sum_res.data:
+                rolling = sum_res.data[0]["summary"]
+        except Exception as e:
+            print(f"Failed to load rolling context: {e}")
+            
+        # Cache preferences and rolling context for 5 minutes
+        memory_cache.put(mem_key, {"preferences": preferences, "rolling_context": rolling}, ttl_seconds=300)
         
     # 3. Load User Facts via RPC
     user_facts = ""
@@ -290,25 +316,30 @@ def save_memory(state):
     current_q = state.get("question", "")
     current_a = state.get("generation", "")
     
-    if not current_q or not current_a:
+    if not current_q or not current_a or "I don't know" in current_a:
         return {}
+        
+    # Cache the final response for exact-match hits
+    r_key = response_cache.generate_key(tenant_id, current_q)
+    response_cache.put(r_key, current_a, ttl_seconds=3600)
         
     db = supabase_manager.get_tenant_client(tenant_id)
     
-    # 1. Fact Extraction
+    # 1. Fact & Preference Extraction
     interaction = f"User: {current_q}\nAssistant: {current_a}"
     try:
         decision = sarvam_instructor.chat.completions.create(
             model="sarvam-30b",
-            response_model=FactList,
+            response_model=MemoryExtraction,
             mode=instructor.Mode.JSON,
             messages=[
-                {"role": "system", "content": "Extract highly specific, discrete facts about the user's preferences, setup, and the entities they are discussing from this interaction. Only output new facts."},
+                {"role": "system", "content": "Extract highly specific, discrete facts about the user's setup, and ALSO extract any explicit rules or preferences they want the assistant to follow (like 'always reply in Spanish' or 'use bullet points'). If there are no new facts or preferences, return empty lists/dicts."},
                 {"role": "user", "content": interaction}
             ]
         )
+        
+        # Save Facts
         for fact in decision.facts:
-            # embed fact
             fact_emb = get_embedding(fact)
             db.table("user_facts").insert({
                 "tenant_id": tenant_id,
@@ -317,8 +348,19 @@ def save_memory(state):
                 "embedding": fact_emb
             }).execute()
             print(f"Extracted Fact: {fact}")
+            
+        # Save Preferences
+        for pref_key, pref_val in decision.preferences.items():
+            db.table("preference_memory").upsert({
+                "tenant_id": tenant_id,
+                "user_id": user_id,
+                "pref_key": pref_key,
+                "pref_value": pref_val
+            }).execute()
+            print(f"Extracted Preference: {pref_key} = {pref_val}")
+            
     except Exception as e:
-        print(f"Fact extraction failed: {e}")
+        print(f"Extraction failed: {e}")
 
     # 2. Graph Update
     try:
@@ -365,16 +407,17 @@ def save_memory(state):
         except Exception as e:
             print(f"Rolling summary failed: {e}")
             
-    # Save the rolling context to episodic_memory (reusing the table)
-    try:
-        db.table("episodic_memory").insert({
-            "tenant_id": tenant_id,
-            "user_id": user_id,
-            "summary": new_summary
-        }).execute()
-        print(f"Updated rolling context.")
-    except Exception as e:
-        print(f"Failed to save rolling context: {e}")
+    # Save the rolling context to episodic_memory ONLY if it was newly generated
+    if new_summary != current_rolling and new_summary.strip():
+        try:
+            db.table("episodic_memory").insert({
+                "tenant_id": tenant_id,
+                "user_id": user_id,
+                "summary": new_summary
+            }).execute()
+            print(f"Updated rolling context.")
+        except Exception as e:
+            print(f"Failed to save rolling context: {e}")
 
     return {"rolling_context": new_summary}
 

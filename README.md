@@ -8,67 +8,87 @@ This is a Retrieval-Augmented Generation (RAG) platform with strict Multi-Tenanc
 - **Agentic Routing:** Uses LangGraph and Groq (`llama-3.1-8b-instant`) to classify user intents (Greeting vs Technical), grade documents, and rewrite bad queries.
 - **Generative Chat:** Uses `sarvam-30b` to synthesize answers seamlessly with LangGraph native asynchronous token streaming.
 
-## Workflow Diagram
+## Workflow Architecture
+
+### Phase 1: Document Ingestion (The Admin Pipeline)
 
 ```mermaid
 graph TD
-    %% Memory Injection
-    Start([Session Start]) --> MemLoad[("Load Episodic & Preference Memory<br/>(Supabase)")]
-    MemLoad --> Contextualize{"Query Contextualization<br/>(Sarvam-8B)"}
+    Upload([Admin Uploads PDF]) --> Extract[("pymupdf4llm<br/>(Markdown Extraction)")]
+    Extract --> Chunk{"Recursive Chunking<br/>(2000c Parent / 400c Child)"}
     
-    %% Semantic Caching
-    Contextualize --> SemanticCache{"Semantic Cache Check<br/>(Similarity > 95%)"}
-    SemanticCache -->|Hit| MemDistill{"Distill Episodic Memory<br/>(Save to Supabase)"}
-    SemanticCache -->|Miss| Router{"Router<br/>(Groq/Llama-3)"}
+    Chunk --> |Child Chunks| Vector["Jina API Embedding"]
+    Vector --> DB_Vector[("Supabase pgvector<br/>(HNSW Index)")]
     
-    %% Routing Logic
-    Router -->|Greeting / FAQ| Cache["Static Response Cache"]
-    Cache --> Output(["Final Answer"])
+    Chunk --> |Parent Chunks| GraphThreads["ThreadPoolExecutor<br/>(10 Chunks Concurrent)"]
+    GraphThreads --> Coref["Coreference Resolution<br/>(Pronoun Replacement)"]
+    Coref --> ExtractGraph["Graph Entity Extraction<br/>(LLM)"]
+    ExtractGraph --> DB_Graph[("Neo4j Knowledge Graph<br/>(Merged Entities)")]
+```
+
+### Phase 2: The Chat Request (The User Pipeline)
+
+```mermaid
+graph TD
+    Start([User Asks Question]) --> CacheCheck{"Semantic Cache Check<br/>(0ms RAM LRU)"}
     
-    Router -->|Technical Query| Hybrid["Hybrid Search Engine"]
+    %% Cache Hit
+    CacheCheck -->|95% Match| StreamCache(["Stream Cached Output"])
+    
+    %% Cache Miss
+    CacheCheck -->|Miss| MemLoad[("Load Stateful Memory<br/>(Preferences & Episodic)")]
+    MemLoad --> Contextualize{"Query Contextualization<br/>(Rewrite with Chat History)"}
+    
+    Contextualize --> Router{"Intelligent Router<br/>(Groq/Llama-3)"}
+    
+    %% Routing
+    Router -->|Greeting / FAQ| StreamGen
+    Router -->|Conversational| StreamGen
+    Router -->|Technical Query| HybridSearch["Concurrent Hybrid Search"]
     
     %% Retrieval
     subgraph Retrieval Phase
-        Hybrid --> VS[("Supabase pgvector<br/>Cosine Similarity")]
-        Hybrid --> KS[("Supabase FTS<br/>BM25 Keyword")]
-        Hybrid --> GS[("Neo4j Graph<br/>Cypher Queries")]
-        VS & KS & GS --> RRF["Reciprocal Rank Fusion<br/>Top 10 Chunks"]
+        HybridSearch --> VS[("Supabase Vector<br/>(HNSW)")]
+        HybridSearch --> KS[("Supabase Keyword<br/>(BM25)") ]
+        HybridSearch --> GS[("Neo4j Graph<br/>(Cypher)")]
+        VS & KS & GS --> RRF["Reciprocal Rank Fusion<br/>(Top 5)"]
     end
     
-    %% Evaluation & Corrective RAG
-    RRF --> Grader{"Jina Cross-Encoder<br/>Reranker Threshold"}
+    %% Reranking
+    RRF --> Grader{"Jina Cross-Encoder<br/>(Score >= 0.05?)"}
     
-    Grader -->|Score >= 0.05| Generator["Response Generator<br/>(sarvam-30b)"]
-    Grader -->|Score < 0.05| Rewriter{"CRAG Rewrite Node<br/>(Rewrite Count < 1?)"}
+    Grader -->|Pass| StreamGen["Response Generator<br/>(gpt-4o-mini SSE Stream)"]
+    Grader -->|Fail All| CRAG{"CRAG Rewrite Node<br/>(Rewrite Count < 1?)"}
     
-    Rewriter -->|Yes| RewriteLLM["Query Rewriter<br/>(Sarvam-105B)"]
-    RewriteLLM --> Hybrid
+    CRAG -->|Yes| RewriteLLM["Rewrite Query"]
+    RewriteLLM --> HybridSearch
+    CRAG -->|No| StreamGen
     
-    Rewriter -->|No| Generator
-    
-    %% Memory Distillation
-    Generator --> MemDistill{"Distill Episodic Memory<br/>(Save to Supabase)"}
-    MemDistill --> Output
+    %% Background Extraction
+    StreamGen --> Output([Show Output])
+    Output -.-> BackgroundExec{{"Background Thread Wakeup"}}
+    BackgroundExec --> ExtractFacts["Extract User Facts & Preferences"]
+    BackgroundExec --> UpdateGraph["Update Neo4j (User) Node"]
+    BackgroundExec --> DistillMem["Distill Episodic Memory"]
 ```
 
-### Step-by-Step Architecture Flow
+### Step-by-Step Flow
 
-1. **Stateful AI Memory Injection:** Before processing the query, the system fetches the user's `Preference Memory` (rules) and `Episodic Memory` (past conversation summaries) from Supabase and injects them into the LangGraph state.
-2. **Contextualization:** If the user asks a follow-up question (e.g., "how do I fix it?"), a lightweight LLM rewrites it into a standalone query using the chat history.
-3. **Intent Routing:** A fast LLM (`sarvam-105b` or `llama-3`) classifies the query. Small-talk is routed to a static cache, while actual questions are routed to the retrieval engine.
-4. **Parallel Hybrid Retrieval:** The system simultaneously queries three databases in parallel threads to drop latency by 60%:
-   - **Vector Search** (HNSW Cosine similarity via pgvector)
-   - **Keyword Search** (BM25 Full Text Search)
-   - **Knowledge Graph** (Coreference Resolution + Cypher queries via Neo4j)
-5. **Reciprocal Rank Fusion (RRF):** The results from all three databases are mathematically fused together to surface the absolute best chunks, giving a 1.5x score boost to chunks where the search keywords match the Markdown Header.
-6. **Cross-Encoder Reranking:** The top 10 chunks are passed to the strict `jina-reranker-v2`. Any chunk that scores below `0.05` is instantly deleted to prevent hallucinations.
-7. **Corrective RAG (CRAG) Loop:** If the Reranker deletes *all* the chunks, the system intercepts the failure. Instead of answering "I don't know," an LLM dynamically rewrites the user's query and loops back to Step 4. (This is capped at 1 rewrite attempt to prevent infinite loops).
-8. **Generation & Memory Distillation:** The validated chunks are passed to `sarvam-30b` to generate the final answer via real-time SSE token streaming. In the background, an LLM distills the interaction into a short summary and saves it back to the `episodic_memory` table for the next visit. New answers are also instantly saved to the `semantic_cache` table for 0ms lookup on future identical queries.
+#### Phase 1: Document Ingestion (The Admin Pipeline)
+1. **Text Extraction:** `pymupdf4llm` converts the raw PDF into structured Markdown.
+2. **Recursive Parent-Child Chunking:** Markdown is sliced into 400-character "Child" chunks (for precise vectors) and 2,000-character "Parent" chunks (for LLM context).
+3. **Concurrent Vectorization:** Child chunks are converted into 1536-dimensional vectors via Jina API and saved to Supabase using an **HNSW index** for sub-millisecond searching.
+4. **Graph Extraction:** A background `ThreadPoolExecutor` grabs 10 Parent chunks at a time. It performs **Coreference Resolution** (replacing pronouns) and extracts Graph Entities/Relationships, safely merging them into Neo4j.
 
-### Stateful AI Memory (Handling Session Restarts)
-To prevent the LLM's context window from blowing up with massive raw chat logs, the system uses a **Distill & Inject** architecture across session boundaries:
-* **Distillation (End of Turn):** After every interaction, a background LLM reads the raw chat logs and condenses them into a 1-sentence summary (e.g., *"User asked about Platform Compatibility"*). This is saved in Supabase.
-* **Injection (Start of New Session):** If a user closes their browser or resets the server, their local `chat_history` is wiped. However, upon their very first new message, the `load_memory` node queries Supabase, pulls the tiny distilled summary, and silently injects it into the System Prompt. This allows the AI to "remember" previous conversations perfectly using less than 50 tokens!
+#### Phase 2: The Chat Request (The User Pipeline)
+1. **Exact-Match Semantic Cache (`check_cache`):** The system securely checks the query against past queries using a blazing-fast RAM `LRUCache`. A 95% match instantly streams the cached answer.
+2. **Stateful Memory Injection (`load_memory`):** Fetches the user's Long-Term Memory (Rules/Preferences, Vector Facts, and Episodic chat summaries) and injects it into the LangGraph state.
+3. **Query Contextualization (`contextualize_query`):** Rewrites follow-up questions using short-term chat history into standalone queries.
+4. **Intelligent Routing (`route_query`):** Categorizes intent. `Greeting` or `Conversational` intents bypass Vector Search entirely, heading straight to the Generator.
+5. **Concurrent Hybrid Retrieval (`retrieve`):** Simultaneously queries Vectors (HNSW), Keywords (BM25), and Knowledge Graph (Neo4j). Fuses results using **Reciprocal Rank Fusion (RRF)**.
+6. **Precision Reranking & CRAG (`grade_documents`):** The Top 5 chunks are graded by `jina-reranker-v2`. Any chunk below `0.05` is discarded. If all chunks fail, a CRAG loop rewrites the query and tries again.
+7. **Asynchronous Streaming (`generate`):** Validated chunks, preferences, and history are sent to `gpt-4o-mini`. Tokens stream instantly back to the UI via Server-Sent Events (SSE).
+8. **Background Extraction (`save_memory`):** After the response, a background thread uses `sarvam-30b` to extract new facts and explicit preferences, dynamically connect the Neo4j `(User)` node, and distill older messages into a rolling summary.
 
 ## Frontend UI & Authentication
 The platform features a modern React (Vite) frontend, split into two primary interfaces:

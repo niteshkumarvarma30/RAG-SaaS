@@ -98,6 +98,11 @@ As we built this SaaS, we hit several technical bottlenecks that required archit
 > 
 > **Reason:** When the Jina Cross-Encoder correctly rejects all chunks because the user asked an irrelevant or trick question, the LLM was left with no context. Instead of just answering "I don't know", we implemented a CRAG loop. When all chunks are rejected, the LangGraph routes to a `rewrite` node that calls an LLM to dynamically reformulate the user's question, and triggers a second Hybrid Search. To guarantee safety and prevent infinite loops, we added a strictly typed `rewrite_count` integer to the LangGraph state that caps the system at 1 rewrite attempt.
 
+> [!TIP]
+> **Added:** Conversational Router Bypass
+> 
+> **Reason:** When a user asked "Can you summarize our conversation?", the Router classified it as a technical query, searched the vector database, found nothing, and forced the LLM to say "I don't know." We introduced a `conversational` route intent. If the query is about chat history, the graph mathematically skips the Vector/Graph Retrieval steps entirely and pipes the query directly to the Generator node along with the `rolling_context`, saving API costs and fixing the hallucination.
+
 > [!IMPORTANT]
 > **Replaced:** Synchronous Response Generation
 > **Upgraded To:** LangGraph Native Asynchronous Streaming
@@ -124,7 +129,8 @@ As we built this SaaS, we hit several technical bottlenecks that required archit
 > [!CAUTION]
 > **Identified Vulnerability:** Semantic Cache "State Poisoning"
 > 
-> **Lesson Learned:** While our 95% similarity Semantic Cache dropped retrieval latency to 0ms, it created a severe debugging blindspot. During development, when an upstream API failed and the LLM safely answered "I don't know", the cache permanently saved that bad response. Even after we completely rebuilt and fixed the Graph database, the system kept answering "I don't know" because the Semantic Cache intercepted the query before it could hit the newly repaired pipeline. We learned that Semantic Caches must be explicitly cleared or bypassed during active prompt/pipeline engineering.
+> **Lesson Learned:** While our 95% similarity Semantic Cache dropped retrieval latency to 0ms, it created a severe debugging blindspot. During development, when an upstream API failed and the LLM safely answered "I don't know", the cache permanently saved that bad response. Even after we completely rebuilt and fixed the Graph database, the system kept answering "I don't know" because the Semantic Cache intercepted the query before it could hit the newly repaired pipeline. 
+> **The Fix:** We implemented a strict output validator in the `save_memory` node. If the generated answer contains the phrase "I don't know", the system completely refuses to cache it, guaranteeing that failed or blocked responses can never poison the cache.
 
 > [!WARNING]
 > **Identified Vulnerability:** Graph Ingestion Rate Limiting
@@ -211,9 +217,11 @@ To scale the platform to production-grade performance, we engineered the retriev
 **The Concept:** Running the Vector search, then waiting for Keyword search, and finally waiting for Graph search causes a severe sequential bottleneck.
 **Our Approach:** We refactored the Hybrid Retriever using Python's `concurrent.futures.ThreadPoolExecutor`. When a user asks a question, all three databases are queried at the exact same millisecond across three separate threads. The total retrieval time dropped by 60%, as it is now only as slow as the single slowest database.
 
-### 6.3 Semantic Caching
+### 6.3 Semantic & Exact-Match Caching
 **The Concept:** If multiple employees ask similar questions (e.g., "What are the tax benefits?"), running the entire LLM pipeline repeatedly wastes thousands of tokens and seconds of compute.
-**Our Approach:** We built a `semantic_cache` table in Supabase. When a question is asked, a new LangGraph node (`check_cache`) instantly embeds the question and compares it against past queries. If the similarity exceeds 95%, the system completely bypasses the Retriever, Grader, and LLM Generator, instantly streaming the cached answer back to the frontend in ~0ms.
+**Our Approach:** We built a multi-level caching system:
+1. **Semantic Cache (Supabase):** Embeds the question and checks for 95% similarity to past queries.
+2. **Exact-Match LRU Cache (In-Memory RAM):** A blazing-fast `collections.OrderedDict` cache with Time-To-Live (TTL). It securely wraps embedding API calls and LTM preference lookups, reducing 500ms network database trips to 0ms instantly.
 
 ### 6.4 Dynamic Token Budgeting
 **The Concept:** Passing a massive amount of context to an LLM can easily overflow its context window limit, causing the API to crash.
@@ -222,8 +230,10 @@ To scale the platform to production-grade performance, we engineered the retriev
 ## 7. Advanced AI Memory Capabilities
 To further mimic human-like reasoning and continuous learning, we integrated advanced background memory processing.
 
-### 7.1 Vectorized Fact Extraction
-**Our Approach:** The backend uses Sarvam-30B (via `instructor` JSON mode) in a background thread to silently monitor every chat interaction. It extracts highly specific, discrete facts about the user's setup and preferences, vectorizes those facts with `jina-embeddings-v4`, and stores them in a dedicated `user_facts` Supabase table for long-term personalized recall.
+### 7.1 Fact & Preference Extraction
+**Our Approach:** The backend uses Sarvam-30B (via `instructor` JSON mode) in a background thread to silently monitor every chat interaction. It extracts two distinct things:
+1. **Facts:** Specific details about the user's setup, stored in a `user_facts` vector database.
+2. **Preferences:** Explicit rules (e.g., "always reply in Spanish" or "use bullet points") which are extracted as JSON key-value pairs and instantly upserted into the `preference_memory` table for strict enforcement.
 
 ### 7.2 Graph-Based User Memory
 **Our Approach:** We extended the Neo4j Knowledge Graph to include users. When a user interacts with the system, it creates a `(User)` node and dynamically draws `[:ASKED_ABOUT]` edges between the User and the specific `(Entity)` nodes they are discussing. This allows the AI to "remember" what topics a user is historically interested in.

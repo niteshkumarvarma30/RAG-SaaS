@@ -1,6 +1,7 @@
 import os
 from src.database.supabase_client import supabase_manager
 from src.database.neo4j_client import neo4j_manager
+from src.retrieval.cache import LRUCache
 import openai
 
 oai_client = openai.OpenAI(
@@ -8,11 +9,22 @@ oai_client = openai.OpenAI(
     base_url="https://api.jina.ai/v1"
 )
 
+embedding_cache = LRUCache(max_size=1000)
+
 def get_embedding(text: str) -> list[float]:
+    key = embedding_cache.generate_key(text)
+    cached = embedding_cache.get(key)
+    if cached is not None:
+        print("[Cache Hit] Fetched embedding from local LRU cache in 0ms")
+        return cached
+
+    print("[Cache Miss] Fetching embedding from Jina API...")
     response = oai_client.embeddings.create(
         input=text, model="jina-embeddings-v4", dimensions=1536
     )
-    return response.data[0].embedding
+    vec = response.data[0].embedding
+    embedding_cache.put(key, vec, ttl_seconds=3600)  # Cache for 1 hour
+    return vec
 
 def vector_search(tenant_id: str, query: str, query_embedding: list[float], top_k: int = 20) -> list[dict]:
     """Cosine Similarity search using pgvector via custom RPC."""
